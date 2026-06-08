@@ -14,6 +14,18 @@ const wss = new WebSocketServer({ server });
 const publicDir = path.join(__dirname, '..', 'public');
 console.log(`[Server] Public directory: ${publicDir}`);
 
+// Force correct MIME types for Render deployment
+app.use((req, res, next) => {
+    if (req.path.endsWith('.js')) {
+        res.setHeader('Content-Type', 'application/javascript; charset=UTF-8');
+    } else if (req.path.endsWith('.css')) {
+        res.setHeader('Content-Type', 'text/css; charset=UTF-8');
+    } else if (req.path.endsWith('.html')) {
+        res.setHeader('Content-Type', 'text/html; charset=UTF-8');
+    }
+    next();
+});
+
 // Health check for Render
 app.get('/healthz', (req, res) => res.send('ok'));
 
