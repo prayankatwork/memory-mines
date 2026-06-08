@@ -40,6 +40,10 @@ class MemoryMinesGame {
         this.footstepTimer = 0;
         this.lastFootstepPos = { x: 0, z: 0 };
 
+        // Audio cooldowns
+        this.lastGunshotTime = 0;
+        this.zoneWarningPlayed = false;
+
         // Network
         this.network = window.network;
         this.bindNetworkEvents();
@@ -122,7 +126,12 @@ class MemoryMinesGame {
         document.addEventListener('mousedown', (e) => {
             if (e.button === 0 && this.pointerLocked) {
                 this.inputs.shooting = true;
-                window.audio.gunshot();
+                // Client-side audio cooldown to match server fire rate (500ms)
+                const now = Date.now();
+                if (now - this.lastGunshotTime >= 450) {
+                    this.lastGunshotTime = now;
+                    window.audio.gunshot();
+                }
             }
         });
         document.addEventListener('mouseup', (e) => {
@@ -443,14 +452,19 @@ class MemoryMinesGame {
             this.updateZoneRing();
         }
 
-        // Check zone warning
+        // Check zone warning (with audio cooldown)
         const distFromCenter = Math.sqrt(this.player.x ** 2 + this.player.z ** 2);
         const zw = document.getElementById('zone-warning');
         if (distFromCenter > this.matchInfo.zoneRadius - 2) {
             zw.classList.remove('hidden');
-            window.audio.zoneWarning();
+            if (!this.zoneWarningPlayed) {
+                this.zoneWarningPlayed = true;
+                window.audio.zoneWarning();
+                setTimeout(() => { this.zoneWarningPlayed = false; }, 2000);
+            }
         } else {
             zw.classList.add('hidden');
+            this.zoneWarningPlayed = false;
         }
 
         this.updateHUD();
@@ -523,7 +537,13 @@ class MemoryMinesGame {
 
     onRoundEnd(msg) {
         this.gameState = 'round_end';
-        this.matchInfo.scores = msg.scores;
+        // Parse scores correctly (server sends by playerId)
+        const myScore = msg.scores[this.network.playerId] || 0;
+        const enemyId = Object.keys(msg.scores).find(k => k !== this.network.playerId);
+        const enemyScore = msg.scores[enemyId] || 0;
+        this.matchInfo.scores.you = myScore;
+        this.matchInfo.scores.enemy = enemyScore;
+
         const re = document.getElementById('round-end-screen');
         re.classList.remove('hidden');
         const isWinner = msg.winner === this.network.playerId;
