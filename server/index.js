@@ -4,7 +4,12 @@ const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
+const mime = require('mime');
 const game = require('./game');
+
+// Register correct MIME types (Express 5/mime v3 compat)
+mime.define({ 'application/javascript': ['js'] }, true);
+mime.define({ 'text/css': ['css'] }, true);
 
 const PORT = process.env.PORT || 3000;
 const app = express();
@@ -14,23 +19,21 @@ const wss = new WebSocketServer({ server });
 const publicDir = path.join(__dirname, '..', 'public');
 console.log(`[Server] Public directory: ${publicDir}`);
 
-// Force correct MIME types for Render deployment
-app.use((req, res, next) => {
-    if (req.path.endsWith('.js')) {
-        res.setHeader('Content-Type', 'application/javascript; charset=UTF-8');
-    } else if (req.path.endsWith('.css')) {
-        res.setHeader('Content-Type', 'text/css; charset=UTF-8');
-    } else if (req.path.endsWith('.html')) {
-        res.setHeader('Content-Type', 'text/html; charset=UTF-8');
-    }
-    next();
-});
-
 // Health check for Render
 app.get('/healthz', (req, res) => res.send('ok'));
 
-// Serve static files from /public
-app.use(express.static(publicDir));
+// Serve static files with forced MIME types via setHeaders
+app.use(express.static(publicDir, {
+    setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.js')) {
+            res.setHeader('Content-Type', 'application/javascript; charset=UTF-8');
+        } else if (filePath.endsWith('.css')) {
+            res.setHeader('Content-Type', 'text/css; charset=UTF-8');
+        } else if (filePath.endsWith('.html')) {
+            res.setHeader('Content-Type', 'text/html; charset=UTF-8');
+        }
+    }
+}));
 
 // Root route — explicitly serve index.html
 app.get('/', (req, res) => {
