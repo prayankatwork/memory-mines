@@ -71,8 +71,9 @@
     });
 
     network.on('opponent_confirmed', () => {
-        loading.classList.remove('hidden');
-        matchFoundSection.classList.add('hidden');
+        // Show indicator that opponent accepted, but KEEP the accept button visible
+        // so this player can still click it. match_start will transition to game.
+        document.getElementById('opponent-accepted').classList.remove('hidden');
     });
 
     network.on('opponent_disconnected', (msg) => {
