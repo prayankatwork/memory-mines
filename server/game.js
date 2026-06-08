@@ -250,17 +250,18 @@ function tick(match) {
 
         // Movement
         let dx = 0, dz = 0;
-        if (input.forward) dz -= moveSpeed;
-        if (input.backward) dz += moveSpeed;
+        if (input.forward) dz += moveSpeed;
+        if (input.backward) dz -= moveSpeed;
         if (input.left) dx -= moveSpeed;
         if (input.right) dx += moveSpeed;
 
         // Rotate movement by camera yaw
+        // Camera convention: rotY=0 faces +Z, direction = (sin(rotY), cos(rotY))
         const yaw = input.mouseX !== undefined ? input.mouseX : ps.rotY;
         ps.rotY = yaw;
         const cos = Math.cos(yaw), sin = Math.sin(yaw);
-        const mdx = dx * cos - dz * sin;
-        const mdz = dx * sin + dz * cos;
+        const mdx = dx * cos + dz * sin;
+        const mdz = -dx * sin + dz * cos;
 
         const newX = ps.x + mdx;
         const newZ = ps.z + mdz;
