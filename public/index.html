@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Memory Mines — 1v1 Duel in the Dark</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <!-- Three.js canvas will be injected here -->
+    <div id="game-container">
+        <div id="hud">
+            <!-- Health bar -->
+            <div id="health-container">
+                <div id="health-bar">
+                    <div id="health-fill"></div>
+                </div>
+                <span id="health-text">100</span>
+            </div>
+            <!-- Ability cooldown -->
+            <div id="ability-container">
+                <div id="ability-icon">🔊</div>
+                <div id="ability-cooldown-bar">
+                    <div id="ability-fill"></div>
+                </div>
+                <span id="ability-text">Sonar Pulse</span>
+                <span id="ability-key">[SPACE]</span>
+            </div>
+            <!-- Round info -->
+            <div id="round-info">Round 1</div>
+            <!-- Score -->
+            <div id="score-container">
+                <span id="score-you">You: 0</span>
+                <span id="score-enemy">Enemy: 0</span>
+            </div>
+            <!-- Zone warning -->
+            <div id="zone-warning" class="hidden">⚠ OUTSIDE ZONE ⚠</div>
+            <!-- Re-reveal indicator -->
+            <div id="reveal-indicator" class="hidden">Revealing...</div>
+            <!-- Kill feed -->
+            <div id="kill-feed"></div>
+            <!-- Crosshair -->
+            <div id="crosshair">+</div>
+            <!-- Death screen -->
+            <div id="death-screen" class="hidden">
+                <div id="death-title">💀 KILLED</div>
+                <div id="death-info"></div>
+                <div id="death-timer">Respawning in 5...</div>
+            </div>
+            <!-- Round end -->
+            <div id="round-end-screen" class="hidden">
+                <div id="round-end-text"></div>
+            </div>
+            <!-- Match end -->
+            <div id="match-end-screen" class="hidden">
+                <div id="match-end-text"></div>
+                <div id="match-scores"></div>
+                <div id="rematch-section" class="hidden">
+                    <button id="rematch-btn">REMARCH</button>
+                    <button id="leave-btn">LEAVE</button>
+                </div>
+            </div>
+            <!-- Sonar pulse flash -->
+            <div id="sonar-flash" class="hidden"></div>
+        </div>
+
+        <!-- Lobby / Menu -->
+        <div id="lobby" class="screen">
+            <div class="lobby-content">
+                <h1>MEMORY MINES</h1>
+                <p class="subtitle">1v1 Duel in the Dark</p>
+                <div class="lobby-status">
+                    <input type="text" id="username-input" placeholder="Enter name..." maxlength="16">
+                    <button id="queue-btn" class="btn-primary">FIND MATCH</button>
+                </div>
+                <div id="queue-status" class="hidden">Searching for opponent...</div>
+                <div id="match-found-section" class="hidden">
+                    <p>Match found! <strong id="opponent-name"></strong></p>
+                    <button id="accept-btn" class="btn-primary">ACCEPT</button>
+                </div>
+                <div class="lobby-info">
+                    <p>🔊 Sonar Pulse — <kbd>SPACE</kbd></p>
+                    <p>🔫 Shoot — <kbd>LEFT CLICK</kbd></p>
+                    <p>🏃 Move — <kbd>WASD</kbd></p>
+                    <p>👁️ Stand still to re-reveal area</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Loading screen -->
+        <div id="loading" class="screen hidden">
+            <div class="loading-content">
+                <h2>LOADING...</h2>
+                <div class="loader"></div>
+            </div>
+        </div>
+
+        <!-- Game UI -->
+        <div id="game-ui" class="hidden">
+            <!-- Click to lock pointer overlay -->
+            <div id="pointer-lock-overlay">
+                <h2>Click to play</h2>
+                <p>Press <kbd>ESC</kbd> to pause</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Three.js CDN (global) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r152/three.min.js"></script>
+
+    <script src="js/audio.js"></script>
+    <script src="js/network.js"></script>
+    <script src="js/game.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>
