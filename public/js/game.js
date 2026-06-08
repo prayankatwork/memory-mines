@@ -417,6 +417,9 @@ class MemoryMinesGame {
     }
 
     onStateUpdate(msg) {
+        // Skip state updates before game is initialized (avoids null reference crashes)
+        if (!this.renderer) return;
+
         // Local player
         if (msg.you) {
             this.player.x = msg.you.x;
