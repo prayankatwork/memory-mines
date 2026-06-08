@@ -1,21 +1,21 @@
-// server/game.js — Match logic, queue management, authoritative game loop
+// server/game.js — Match logic, queue management, authoritative game loop with mines
 
 const { v4: uuidv4 } = require('uuid');
-const { generateMap, isWalkable, MAP_SIZE, TILE_SIZE, GRID_SIZE } = require('./map');
+const { generateMap, isWalkable, MAP_SIZE, TILE_SIZE, GRID_SIZE, MINE_TYPE } = require('./map');
 const { getClassDef, CLASSES } = require('./classes');
 
 // ── State ──
-const queue = [];                    // playerId[]
-const players = new Map();           // playerId -> { ws, username, inMatch, matchId }
-const matches = new Map();           // matchId -> matchState
+const queue = [];
+const players = new Map();
+const matches = new Map();
 
-const TICK_RATE = 20;                // Hz
+const TICK_RATE = 20;
 const TICK_INTERVAL = 1000 / TICK_RATE;
 
-// ── Match State Machine ──
+// ── Match Phase ──
 const MATCH_PHASE = {
     WAITING: 'waiting',
-    REVEAL: 'reveal',
+    MEMORIZE: 'memorize',
     DARK: 'dark',
     ROUND_END: 'round_end',
     MATCH_END: 'match_end'
@@ -32,10 +32,8 @@ function registerPlayer(ws) {
 function removePlayer(id) {
     const p = players.get(id);
     if (!p) return;
-    // Leave queue
     const qi = queue.indexOf(id);
     if (qi !== -1) queue.splice(qi, 1);
-    // Leave match
     if (p.matchId) endMatch(p.matchId, { type: 'disconnect', playerId: id });
     players.delete(id);
 }
@@ -48,7 +46,6 @@ function setUsername(id, name) {
 // ── Queue ──
 function joinQueue(playerId) {
     if (queue.includes(playerId)) return;
-    // Leave current match if any
     const p = players.get(playerId);
     if (p && p.matchId) endMatch(p.matchId, { type: 'disconnect', playerId });
     queue.push(playerId);
@@ -65,9 +62,12 @@ function tryMatch() {
     const a = queue.shift();
     const b = queue.shift();
     const pa = players.get(a), pb = players.get(b);
-    if (!pa || !pb) { if (pa) queue.unshift(a); if (pb) queue.unshift(b); return; }
+    if (!pa || !pb) {
+        if (pa) queue.unshift(a);
+        if (pb) queue.unshift(b);
+        return;
+    }
 
-    // Send match found
     const matchId = uuidv4().slice(0, 8);
     const match = createMatch(matchId, pa, pb);
     matches.set(matchId, match);
@@ -78,10 +78,8 @@ function tryMatch() {
     send(pa, { type: 'match_found', matchId, opponent: pb.username });
     send(pb, { type: 'match_found', matchId, opponent: pa.username });
 
-    // Wait for confirmations (3s timeout)
     match.confirmTimer = setTimeout(() => {
         if (match.phase === MATCH_PHASE.WAITING) {
-            // One or both didn't confirm — cancel
             const ca = match.confirmed.has(pa.id);
             const cb = match.confirmed.has(pb.id);
             cleanupMatch(matchId);
@@ -89,17 +87,15 @@ function tryMatch() {
             if (cb) queue.unshift(b);
             tryMatch();
         }
-    }, 10000); // 10s to confirm
+    }, 10000);
 }
 
 function confirmMatch(playerId) {
     for (const [, match] of matches) {
         if ((match.p1.id === playerId || match.p2.id === playerId) && match.phase === MATCH_PHASE.WAITING) {
             match.confirmed.add(playerId);
-            // Send confirmation back to the clicking player (so they see immediate feedback)
             const player = players.get(playerId);
             if (player) send(player, { type: 'match_confirmed' });
-            // Notify the other player that opponent confirmed
             const other = match.p1.id === playerId ? match.p2 : match.p1;
             send(other, { type: 'opponent_confirmed' });
             if (match.confirmed.size >= 2) {
@@ -122,29 +118,31 @@ function createMatch(id, p1, p2) {
         confirmTimer: null,
         mapSeed: seed,
         map: null,
-        state: null,
         tickTimer: null,
         round: 1,
         scores: { [p1.id]: 0, [p2.id]: 0 },
         players: {
-            [p1.id]: createPlayerState(p1.id, CLASSES.SCOUT),
-            [p2.id]: createPlayerState(p2.id, CLASSES.SCOUT)
+            [p1.id]: createPlayerState(p1.id),
+            [p2.id]: createPlayerState(p2.id)
         },
         inputs: { [p1.id]: {}, [p2.id]: {} },
-        revealTimer: 0,
+        memorizeTimer: 10000,       // 10s memorize phase
         zoneCenterX: 0, zoneCenterZ: 0,
         zoneRadius: MAP_SIZE / 2 - 2,
         zoneShrinkTimer: 0,
-        nextShrinkRadius: MAP_SIZE / 2 - 2,
         roundEndTimer: 0,
-        tickCount: 0
+        tickCount: 0,
+        // Proximity mine tracking
+        proximityBeeps: {},         // mineId -> { count, timer, targetId }
+        // Muzzle flash tracking
+        muzzleFlashes: {}           // playerId -> remaining ms
     };
 }
 
-function createPlayerState(id, classType) {
-    const def = getClassDef(classType);
+function createPlayerState(id) {
+    const def = getClassDef(CLASSES.SCOUT);
     return {
-        id, classType,
+        id,
         x: 0, z: 0, rotY: 0,
         health: def.health,
         maxHealth: def.health,
@@ -152,14 +150,14 @@ function createPlayerState(id, classType) {
         abilityCooldown: 0,
         abilityActive: false,
         abilityTimer: 0,
-        reRevealTimer: 0,
-        isRevealing: false,
         fireCooldown: 0,
         kills: 0,
         deaths: 0,
         lastFootstepX: 0,
         lastFootstepZ: 0,
-        lastFootstepTick: 0
+        lastFootstepTick: 0,
+        // Track which mines the player has already stepped on this round (to prevent double-trigger)
+        triggeredMines: new Set()
     };
 }
 
@@ -184,63 +182,87 @@ function startMatch(match) {
     resetPlayerState(p1s);
     resetPlayerState(p2s);
 
-    match.phase = MATCH_PHASE.REVEAL;
-    match.revealTimer = 15000; // 15 seconds
+    match.phase = MATCH_PHASE.MEMORIZE;
+    match.memorizeTimer = 10000;
     match.zoneRadius = MAP_SIZE / 2 - 2;
     match.zoneShrinkTimer = 0;
     match.zoneCenterX = 0;
     match.zoneCenterZ = 0;
+    match.proximityBeeps = {};
+    match.muzzleFlashes = {};
+    match.tickCount = 0;
 
-    // Send match start to both
+    // Clone mines for this match (so we can track triggered state)
+    match.activeMines = map.mines.map(m => ({
+        ...m,
+        triggered: false,
+        triggerTime: 0,
+        beeping: false,
+        beepCount: 0,
+        lastBeepTime: 0
+    }));
+
+    // Send match start to both — include mine data (all visible during MEMORIZE)
     const mapData = {
         seed: match.mapSeed,
         grid: match.map.grid,
         landmarks: match.map.landmarks,
+        mines: match.activeMines.map(m => ({
+            id: m.id, x: m.x, z: m.z, type: m.type, active: true
+        })),
         mapSize: MAP_SIZE,
         tileSize: TILE_SIZE,
         gridSize: GRID_SIZE,
         spawns: match.map.spawns.map(s => ({ x: s.x, z: s.z }))
     };
 
-    send(match.p1, { type: 'match_start', matchId: match.id, round: match.round, classType: CLASSES.SCOUT, map: mapData, yourSpawn: { x: p1s.x, z: p1s.z }, opponentSpawn: { x: p2s.x, z: p2s.z } });
-    send(match.p2, { type: 'match_start', matchId: match.id, round: match.round, classType: CLASSES.SCOUT, map: mapData, yourSpawn: { x: p2s.x, z: p2s.z }, opponentSpawn: { x: p1s.x, z: p1s.z } });
+    send(match.p1, {
+        type: 'match_start', matchId: match.id, round: match.round,
+        classType: CLASSES.SCOUT, map: mapData,
+        yourSpawn: { x: p1s.x, z: p1s.z },
+        opponentSpawn: { x: p2s.x, z: p2s.z }
+    });
+    send(match.p2, {
+        type: 'match_start', matchId: match.id, round: match.round,
+        classType: CLASSES.SCOUT, map: mapData,
+        yourSpawn: { x: p2s.x, z: p2s.z },
+        opponentSpawn: { x: p1s.x, z: p1s.z }
+    });
 
     // Start game tick
     match.tickTimer = setInterval(() => tick(match), TICK_INTERVAL);
 }
 
 function resetPlayerState(ps) {
-    const def = getClassDef(ps.classType);
+    const def = getClassDef(CLASSES.SCOUT);
     ps.health = def.health;
     ps.alive = true;
     ps.abilityCooldown = 0;
     ps.abilityActive = false;
     ps.abilityTimer = 0;
-    ps.reRevealTimer = 0;
-    ps.isRevealing = false;
     ps.fireCooldown = 0;
+    ps.triggeredMines = new Set();
 }
 
 // ── Game Tick ──
 function tick(match) {
-    if (match.phase === MATCH_PHASE.MATCH_END || match.phase === MATCH_PHASE.ROUND_END) {
-        return; // Wait for timer or next phase
-    }
+    if (match.phase === MATCH_PHASE.MATCH_END || match.phase === MATCH_PHASE.ROUND_END) return;
 
     const def = getClassDef(CLASSES.SCOUT);
     const dt = TICK_INTERVAL / 1000;
+    match.tickCount++;
 
-    // Update reveal timer
-    if (match.phase === MATCH_PHASE.REVEAL) {
-        match.revealTimer -= TICK_INTERVAL;
-        if (match.revealTimer <= 0) {
+    // ── Phase Timer ──
+    if (match.phase === MATCH_PHASE.MEMORIZE) {
+        match.memorizeTimer -= TICK_INTERVAL;
+        if (match.memorizeTimer <= 0) {
             match.phase = MATCH_PHASE.DARK;
             send(match.p1, { type: 'darkness' });
             send(match.p2, { type: 'darkness' });
         }
     }
 
-    // Process inputs and update players
+    // ── Process Each Player ──
     for (const p of [match.p1, match.p2]) {
         const ps = match.players[p.id];
         if (!ps.alive) continue;
@@ -255,8 +277,6 @@ function tick(match) {
         if (input.left) dx -= moveSpeed;
         if (input.right) dx += moveSpeed;
 
-        // Rotate movement by camera yaw
-        // Camera convention: rotY=0 faces +Z, direction = (sin(rotY), cos(rotY))
         const yaw = input.mouseX !== undefined ? input.mouseX : ps.rotY;
         ps.rotY = yaw;
         const cos = Math.cos(yaw), sin = Math.sin(yaw);
@@ -276,19 +296,14 @@ function tick(match) {
             ps.z = newZ;
         }
 
-        // Re-reveal mechanic (standing still)
-        const isMoving = input.forward || input.backward || input.left || input.right;
-        if (isMoving) {
-            ps.reRevealTimer = 0;
-            ps.isRevealing = false;
-        } else if (match.phase === MATCH_PHASE.DARK) {
-            ps.reRevealTimer += TICK_INTERVAL;
-            ps.isRevealing = ps.reRevealTimer >= def.revealTime;
+        // ── Mine Collision ──
+        if (match.phase === MATCH_PHASE.DARK) {
+            checkMineCollision(match, p, ps, def);
         }
 
-        // Enemy footstep audio — send to opponent when player moves significantly
-        const movedDist = Math.abs(ps.x - ps.lastFootstepX) + Math.abs(ps.z - ps.lastFootstepZ);
-        if (movedDist > 1.0 && match.tickCount - ps.lastFootstepTick > 6) { // ~300ms at 20Hz
+        // ── Footstep Audio (send to opponent) ──
+        const moved = Math.abs(ps.x - ps.lastFootstepX) + Math.abs(ps.z - ps.lastFootstepZ);
+        if (moved > 1.0 && match.tickCount - ps.lastFootstepTick > 6) {
             ps.lastFootstepTick = match.tickCount;
             ps.lastFootstepX = ps.x;
             ps.lastFootstepZ = ps.z;
@@ -296,128 +311,272 @@ function tick(match) {
             send(other, { type: 'footstep', x: ps.x, z: ps.z });
         }
 
-        // Ability cooldown
+        // ── Ability Cooldown ──
         if (ps.abilityCooldown > 0) ps.abilityCooldown -= TICK_INTERVAL;
         if (ps.abilityActive) {
             ps.abilityTimer -= TICK_INTERVAL;
             if (ps.abilityTimer <= 0) ps.abilityActive = false;
         }
 
-        // Use ability
-        if (input.ability && ps.abilityCooldown <= 0 && !ps.abilityActive) {
+        // ── Use Ability (Sonar Scan — reveals mines nearby) ──
+        if (input.ability && ps.abilityCooldown <= 0 && !ps.abilityActive && match.phase === MATCH_PHASE.DARK) {
             ps.abilityCooldown = def.abilityCooldown;
             ps.abilityActive = true;
             ps.abilityTimer = def.abilityDuration;
-            // Notify both players
+            // Send sonar_pulse to both players
             send(match.p1, { type: 'sonar_pulse', playerId: p.id, x: ps.x, z: ps.z, radius: def.abilityRadius });
             send(match.p2, { type: 'sonar_pulse', playerId: p.id, x: ps.x, z: ps.z, radius: def.abilityRadius });
         }
 
-        // Shooting
+        // ── Shooting ──
         if (ps.fireCooldown > 0) ps.fireCooldown -= TICK_INTERVAL;
-        if (input.shooting && ps.fireCooldown <= 0) {
+        if (input.shooting && ps.fireCooldown <= 0 && match.phase !== MATCH_PHASE.MEMORIZE) {
             ps.fireCooldown = def.weaponFireRate;
-            handleShot(match, p, ps);
+            handleShot(match, p, ps, def);
+            // Muzzle flash — reveal shooter's position to enemy
+            if (!match.muzzleFlashes) match.muzzleFlashes = {};
+            match.muzzleFlashes[p.id] = def.muzzleFlashDuration;
+            const other = p.id === match.p1.id ? match.p2 : match.p1;
+            send(other, { type: 'muzzle_flash', x: ps.x, z: ps.z, duration: def.muzzleFlashDuration });
         }
 
-        // Zone damage
+        // ── Muzzle Flash Timer ──
+        if (match.muzzleFlashes && match.muzzleFlashes[p.id] > 0) {
+            match.muzzleFlashes[p.id] -= TICK_INTERVAL;
+            if (match.muzzleFlashes[p.id] <= 0) delete match.muzzleFlashes[p.id];
+        }
+
+        // ── Zone Damage ──
         const distFromCenter = Math.sqrt(ps.x * ps.x + ps.z * ps.z);
         if (distFromCenter > match.zoneRadius) {
-            ps.health -= 5 * dt; // 5 dps outside zone
+            ps.health -= def.zoneDamage * dt;
             if (ps.health <= 0) {
                 ps.health = 0;
-                killPlayer(match, p, null); // Killed by zone
+                killPlayer(match, p, null, 'zone');
             }
         }
     }
 
-    // Increment tick counter
-    match.tickCount++;
-
-    // Zone shrinking
-    match.zoneShrinkTimer += TICK_INTERVAL;
+    // ── Zone Shrinking (starts after 20s in DARK) ──
     if (match.phase === MATCH_PHASE.DARK) {
-        if (match.zoneShrinkTimer > 30000 && match.zoneRadius > 10) {
-            match.zoneRadius = Math.max(10, match.zoneRadius - 0.5);
+        match.zoneShrinkTimer += TICK_INTERVAL;
+        if (match.zoneShrinkTimer > 20000 && match.zoneRadius > 8) {
+            match.zoneRadius = Math.max(8, match.zoneRadius - 0.3);
             send(match.p1, { type: 'zone_update', radius: match.zoneRadius, centerX: 0, centerZ: 0 });
             send(match.p2, { type: 'zone_update', radius: match.zoneRadius, centerX: 0, centerZ: 0 });
         }
-        if (match.zoneShrinkTimer > 45000 && match.zoneRadius > 5) {
-            match.zoneRadius = Math.max(5, match.zoneRadius - 0.8);
+        if (match.zoneShrinkTimer > 35000 && match.zoneRadius > 4) {
+            match.zoneRadius = Math.max(4, match.zoneRadius - 0.5);
             send(match.p1, { type: 'zone_update', radius: match.zoneRadius, centerX: 0, centerZ: 0 });
             send(match.p2, { type: 'zone_update', radius: match.zoneRadius, centerX: 0, centerZ: 0 });
         }
     }
 
-    // Send state update
+    // ── Process Proximity Mine Beeps ──
+    processProximityBeeps(match);
+
+    // ── Send State Update ──
     broadcastState(match);
 }
 
-function handleShot(match, shooter, shooterState) {
-    const def = getClassDef(CLASSES.SCOUT);
+// ── Mine Collision ──
+function checkMineCollision(match, player, ps, def) {
+    for (const mine of match.activeMines) {
+        if (!mine.active || mine.triggered) continue;
+        if (ps.triggeredMines.has(mine.id)) continue;
+
+        const dx = ps.x - mine.x;
+        const dz = ps.z - mine.z;
+        const dist = Math.sqrt(dx * dx + dz * dz);
+
+        switch (mine.type) {
+            case MINE_TYPE.TRIGGER:
+                if (dist < 1.5) {
+                    // Trigger! Damage + position reveal
+                    mine.triggered = true;
+                    mine.active = false;
+                    ps.triggeredMines.add(mine.id);
+                    ps.health -= def.mineTriggerDamage;
+
+                    // Send explosion event to both players
+                    const triggerMsg = {
+                        type: 'mine_explosion',
+                        mineId: mine.id,
+                        x: mine.x,
+                        z: mine.z,
+                        mineType: mine.type,
+                        damage: def.mineTriggerDamage,
+                        victimId: ps.id
+                    };
+                    send(match.p1, triggerMsg);
+                    send(match.p2, triggerMsg);
+
+                    // Victim position revealed to enemy
+                    const enemy = ps.id === match.p1.id ? match.p2 : match.p1;
+                    send(enemy, { type: 'player_detected', x: ps.x, z: ps.z, reason: 'mine_explosion' });
+
+                    if (ps.health <= 0) {
+                        ps.health = 0;
+                        killPlayer(match, player, null, 'mine');
+                    }
+                }
+                break;
+
+            case MINE_TYPE.PROXIMITY:
+                if (dist < 3.0) {
+                    // Start or continue beeping sequence
+                    if (!mine.beeping) {
+                        mine.beeping = true;
+                        mine.beepCount = 0;
+                        mine.lastBeepTime = Date.now();
+                        // Send initial beep
+                        send(match.p1, { type: 'proximity_beep', mineId: mine.id, x: mine.x, z: mine.z, count: 1, total: 3, targetId: ps.id });
+                        send(match.p2, { type: 'proximity_beep', mineId: mine.id, x: mine.x, z: mine.z, count: 1, total: 3, targetId: ps.id });
+                    } else {
+                        // Check if it's time for next beep
+                        const elapsed = Date.now() - mine.lastBeepTime;
+                        if (elapsed >= 350 && mine.beepCount < 3) {
+                            mine.beepCount++;
+                            mine.lastBeepTime = Date.now();
+                            send(match.p1, { type: 'proximity_beep', mineId: mine.id, x: mine.x, z: mine.z, count: mine.beepCount, total: 3, targetId: ps.id });
+                            send(match.p2, { type: 'proximity_beep', mineId: mine.id, x: mine.x, z: mine.z, count: mine.beepCount, total: 3, targetId: ps.id });
+
+                            if (mine.beepCount >= 3) {
+                                // Explode!
+                                mine.triggered = true;
+                                mine.active = false;
+                                ps.triggeredMines.add(mine.id);
+                                ps.health -= def.mineProximityDamage;
+
+                                const boomMsg = {
+                                    type: 'mine_explosion',
+                                    mineId: mine.id,
+                                    x: mine.x,
+                                    z: mine.z,
+                                    mineType: mine.type,
+                                    damage: def.mineProximityDamage,
+                                    victimId: ps.id
+                                };
+                                send(match.p1, boomMsg);
+                                send(match.p2, boomMsg);
+
+                                const enemy = ps.id === match.p1.id ? match.p2 : match.p1;
+                                send(enemy, { type: 'player_detected', x: ps.x, z: ps.z, reason: 'mine_explosion' });
+
+                                if (ps.health <= 0) {
+                                    ps.health = 0;
+                                    killPlayer(match, player, null, 'mine');
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Player moved out of range — reset beeping
+                    if (mine.beeping) {
+                        mine.beeping = false;
+                        mine.beepCount = 0;
+                    }
+                }
+                break;
+
+            case MINE_TYPE.DECOY:
+                // Harmless — but visually looks like a real mine on sonar
+                // No collision logic needed
+                if (dist < 1.0) {
+                    // Player steps on decoy — send a subtle visual cue
+                    if (!mine.triggered) {
+                        mine.triggered = true; // Mark as "found" so it disappears
+                        send(match.p1, { type: 'decoy_found', mineId: mine.id, x: mine.x, z: mine.z, playerId: ps.id });
+                        send(match.p2, { type: 'decoy_found', mineId: mine.id, x: mine.x, z: mine.z, playerId: ps.id });
+                    }
+                }
+                break;
+        }
+    }
+}
+
+function processProximityBeeps(match) {
+    // Clean up orphaned beeping state (player moved away)
+    for (const mine of match.activeMines) {
+        if (!mine.beeping) continue;
+
+        // Check if either player is still nearby
+        let nearby = false;
+        for (const p of [match.p1, match.p2]) {
+            const ps = match.players[p.id];
+            if (!ps.alive) continue;
+            const dx = ps.x - mine.x;
+            const dz = ps.z - mine.z;
+            if (Math.sqrt(dx * dx + dz * dz) < 3.0) {
+                nearby = true;
+                break;
+            }
+        }
+        if (!nearby) {
+            mine.beeping = false;
+            mine.beepCount = 0;
+        }
+    }
+}
+
+// ── Shooting ──
+function handleShot(match, shooter, shooterState, def) {
     const target = shooter.id === match.p1.id ? match.p2 : match.p1;
     const targetState = match.players[target.id];
     if (!targetState.alive) return;
 
-    // Simple hit detection: check distance and direction
     const dx = targetState.x - shooterState.x;
     const dz = targetState.z - shooterState.z;
     const dist = Math.sqrt(dx * dx + dz * dz);
 
     if (dist <= def.weaponRange) {
-        // Check if roughly facing the target
         const angle = Math.atan2(dx, dz);
         let angleDiff = shooterState.rotY - angle;
         while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
         while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
 
-        if (Math.abs(angleDiff) < Math.PI * 0.6) { // ~108 degree FOV
+        if (Math.abs(angleDiff) < Math.PI * 0.6) {
             targetState.health -= def.weaponDamage;
             send(shooter, { type: 'hit_confirmed', damage: def.weaponDamage });
-
-            // Direction from shooter to target for death feedback
             const dir = getDirectionLabel(angle);
-            send(target, { type: 'you_were_hit', health: targetState.health, damage: def.weaponDamage, attackerName: shooter.username, direction: dir, distance: Math.round(dist) });
+            send(target, {
+                type: 'you_were_hit',
+                health: targetState.health,
+                damage: def.weaponDamage,
+                attackerName: shooter.username,
+                direction: dir,
+                distance: Math.round(dist)
+            });
 
             if (targetState.health <= 0) {
                 targetState.health = 0;
-                killPlayer(match, target, shooter);
+                killPlayer(match, target, shooter, 'shot');
             }
         }
     }
 }
 
-function killPlayer(match, victim, killer) {
+// ── Kill ──
+function killPlayer(match, victim, killer, method) {
     const vs = match.players[victim.id];
     vs.alive = false;
-    vs.kills = 0;
     vs.deaths++;
 
-    const killerName = killer ? killer.username : 'Zone';
+    let killerName = 'Zone';
     let dir = 'Unknown';
     let dist = 0;
 
     if (killer) {
+        killerName = killer.username;
         const dx = vs.x - match.players[killer.id].x;
         const dz = vs.z - match.players[killer.id].z;
         dist = Math.round(Math.sqrt(dx * dx + dz * dz));
         dir = getDirectionLabel(Math.atan2(dx, dz));
     }
 
-    // Determine detection method
-    let detectedBy = 'line_of_sight';
-    if (match.phase === MATCH_PHASE.REVEAL) {
-        detectedBy = 'reveal_phase';
-    } else if (killer) {
-        const ks = match.players[killer.id];
-        if (ks.abilityActive) {
-            detectedBy = 'sonar_pulse';
-        } else if (vs.isRevealing) {
-            detectedBy = 're_revealing';
-        }
-    }
+    let detectedBy = method || 'line_of_sight';
 
-    // Death feedback with context
+    // Death feedback
     send(victim, {
         type: 'you_died',
         killerName,
@@ -427,7 +586,6 @@ function killPlayer(match, victim, killer) {
         round: match.round
     });
 
-    // Notify killer
     if (killer) {
         const ks = match.players[killer.id];
         ks.kills++;
@@ -438,19 +596,33 @@ function killPlayer(match, victim, killer) {
     const winner = killer ? killer.id : (victim.id === match.p1.id ? match.p2.id : match.p1.id);
     match.scores[winner]++;
     match.phase = MATCH_PHASE.ROUND_END;
-    match.roundEndTimer = 5000; // 5s pause
+    match.roundEndTimer = 5000;
 
     const winnerName = killer ? killer.username : (winner === match.p1.id ? match.p1.username : match.p2.username);
-    send(match.p1, { type: 'round_end', winner: winner, winnerName, scores: match.scores, round: match.round });
-    send(match.p2, { type: 'round_end', winner: winner, winnerName, scores: match.scores, round: match.round });
+    send(match.p1, {
+        type: 'round_end', winner, winnerName,
+        scores: match.scores, round: match.round,
+        cause: method
+    });
+    send(match.p2, {
+        type: 'round_end', winner, winnerName,
+        scores: match.scores, round: match.round,
+        cause: method
+    });
 
-    // Check match win (first to 2)
-    if (match.scores[winner] >= 2) {
+    // Check match win (first to 3)
+    if (match.scores[winner] >= 3) {
         setTimeout(() => {
             if (matches.has(match.id)) {
                 match.phase = MATCH_PHASE.MATCH_END;
-                send(match.p1, { type: 'match_end', winner: winner, winnerName, finalScores: match.scores });
-                send(match.p2, { type: 'match_end', winner: winner, winnerName, finalScores: match.scores });
+                send(match.p1, {
+                    type: 'match_end', winner, winnerName,
+                    finalScores: match.scores
+                });
+                send(match.p2, {
+                    type: 'match_end', winner, winnerName,
+                    finalScores: match.scores
+                });
                 send(match.p1, { type: 'rematch_available', matchId: match.id });
                 send(match.p2, { type: 'rematch_available', matchId: match.id });
             }
@@ -460,24 +632,49 @@ function killPlayer(match, victim, killer) {
         setTimeout(() => {
             if (matches.has(match.id)) {
                 match.round++;
-                match.phase = MATCH_PHASE.REVEAL;
-                match.revealTimer = 15000;
+                match.phase = MATCH_PHASE.MEMORIZE;
+                match.memorizeTimer = 10000;
 
-                // Reset player positions and health
                 const p1s = match.players[match.p1.id];
                 const p2s = match.players[match.p2.id];
                 if (match.map.spawns.length >= 2) {
                     p1s.x = match.map.spawns[0].x; p1s.z = match.map.spawns[0].z;
                     p2s.x = match.map.spawns[1].x; p2s.z = match.map.spawns[1].z;
                 }
-                // Reset zone for new round
+                // Reset zone and mines for new round
                 match.zoneShrinkTimer = 0;
                 match.zoneRadius = MAP_SIZE / 2 - 2;
+                match.activeMines = match.map.mines.map(m => ({
+                    ...m,
+                    triggered: false,
+                    triggerTime: 0,
+                    beeping: false,
+                    beepCount: 0,
+                    lastBeepTime: 0
+                }));
+                match.proximityBeeps = {};
+                match.muzzleFlashes = {};
+
                 resetPlayerState(p1s);
                 resetPlayerState(p2s);
 
-                send(match.p1, { type: 'new_round', round: match.round, spawn: { x: p1s.x, z: p1s.z }, opponentSpawn: { x: p2s.x, z: p2s.z } });
-                send(match.p2, { type: 'new_round', round: match.round, spawn: { x: p2s.x, z: p2s.z }, opponentSpawn: { x: p1s.x, z: p1s.z } });
+                // Send new round with fresh mine data
+                const minesData = match.activeMines.map(m => ({
+                    id: m.id, x: m.x, z: m.z, type: m.type, active: true
+                }));
+
+                send(match.p1, {
+                    type: 'new_round', round: match.round,
+                    spawn: { x: p1s.x, z: p1s.z },
+                    opponentSpawn: { x: p2s.x, z: p2s.z },
+                    mines: minesData
+                });
+                send(match.p2, {
+                    type: 'new_round', round: match.round,
+                    spawn: { x: p2s.x, z: p2s.z },
+                    opponentSpawn: { x: p1s.x, z: p1s.z },
+                    mines: minesData
+                });
             }
         }, 5000);
     }
@@ -495,39 +692,69 @@ function getDirectionLabel(angle) {
     return 'Northwest';
 }
 
+// ── State Broadcasting ──
 function broadcastState(match) {
     const p1s = match.players[match.p1.id];
     const p2s = match.players[match.p2.id];
 
-    // Reveal in sonar pulse: tell the enemy's position if ability is active
-    const p1SeesEnemy = p1s.abilityActive;
-    const p2SeesEnemy = p2s.abilityActive;
+    // Which mines are visible?
+    // - During MEMORIZE: all active mines visible
+    // - During DARK: only mines within sonar range of ability-active player
+    const getVisibleMines = (playerState, abilityActive) => {
+        if (match.phase === MATCH_PHASE.MEMORIZE) {
+            return match.activeMines.filter(m => m.active).map(m => ({
+                id: m.id, x: m.x, z: m.z, type: m.type, active: m.active, triggered: m.triggered
+            }));
+        }
+        if (!abilityActive) return [];
+        return match.activeMines
+            .filter(m => {
+                if (!m.active) return false;
+                const dx = playerState.x - m.x;
+                const dz = playerState.z - m.z;
+                return Math.sqrt(dx * dx + dz * dz) <= 15;
+            })
+            .map(m => ({
+                id: m.id, x: m.x, z: m.z, type: m.type, active: m.active, triggered: m.triggered
+            }));
+    };
+
+    // Can see enemy?
+    const p1SeesEnemy = match.phase === MATCH_PHASE.MEMORIZE || p1s.abilityActive || p2s.isRevealing;
+    const p2SeesEnemy = match.phase === MATCH_PHASE.MEMORIZE || p2s.abilityActive || p1s.isRevealing;
+
+    // Muzzle flash detection
+    const p1HasMuzzleFlash = match.muzzleFlashes && match.muzzleFlashes[p1.id] > 0;
+    const p2HasMuzzleFlash = match.muzzleFlashes && match.muzzleFlashes[p2.id] > 0;
 
     const state = {
         type: 'state_update',
         gameState: match.phase,
         round: match.round,
-        revealTimeLeft: match.phase === MATCH_PHASE.REVEAL ? Math.ceil(match.revealTimer / 1000) : 0,
+        memorizeTimeLeft: match.phase === MATCH_PHASE.MEMORIZE ? Math.ceil(match.memorizeTimer / 1000) : 0,
         zoneRadius: match.zoneRadius,
         zoneCenterX: match.zoneCenterX,
-        zoneCenterZ: match.zoneCenterZ
+        zoneCenterZ: match.zoneCenterZ,
+        zoneShrinking: match.phase === MATCH_PHASE.DARK && match.zoneShrinkTimer > 15000
     };
 
     // Send to P1
     send(match.p1, {
         ...state,
+        visibleMines: getVisibleMines(p1s, p1s.abilityActive),
         you: {
             x: p1s.x, z: p1s.z, rotY: p1s.rotY,
             health: p1s.health, maxHealth: p1s.maxHealth,
             abilityCooldown: p1s.abilityCooldown,
             abilityActive: p1s.abilityActive,
-            isRevealing: p1s.isRevealing,
             alive: p1s.alive
         },
         enemy: {
             x: p2s.x, z: p2s.z, rotY: p2s.rotY,
             health: p2s.health,
-            visible: match.phase === MATCH_PHASE.REVEAL || p1s.abilityActive || p2s.isRevealing,
+            visible: p1SeesEnemy || p2HasMuzzleFlash,
+            muzzleFlash: p2HasMuzzleFlash,
+            reason: p2HasMuzzleFlash ? 'muzzle_flash' : '',
             alive: p2s.alive
         }
     });
@@ -535,18 +762,20 @@ function broadcastState(match) {
     // Send to P2
     send(match.p2, {
         ...state,
+        visibleMines: getVisibleMines(p2s, p2s.abilityActive),
         you: {
             x: p2s.x, z: p2s.z, rotY: p2s.rotY,
             health: p2s.health, maxHealth: p2s.maxHealth,
             abilityCooldown: p2s.abilityCooldown,
             abilityActive: p2s.abilityActive,
-            isRevealing: p2s.isRevealing,
             alive: p2s.alive
         },
         enemy: {
             x: p1s.x, z: p1s.z, rotY: p1s.rotY,
             health: p1s.health,
-            visible: match.phase === MATCH_PHASE.REVEAL || p2s.abilityActive || p1s.isRevealing,
+            visible: p2SeesEnemy || p1HasMuzzleFlash,
+            muzzleFlash: p1HasMuzzleFlash,
+            reason: p1HasMuzzleFlash ? 'muzzle_flash' : '',
             alive: p1s.alive
         }
     });
@@ -573,7 +802,6 @@ function handleRematch(playerId, accept) {
                 const other = match.p1.id === playerId ? match.p2 : match.p1;
                 send(other, { type: 'rematch_requested' });
                 if (match.rematch.size >= 2) {
-                    // Start new match with same players
                     cleanupMatch(match.id, true);
                     const newId = uuidv4().slice(0, 8);
                     const newMatch = createMatch(newId, match.p1, match.p2);
@@ -585,7 +813,6 @@ function handleRematch(playerId, accept) {
             } else {
                 const other = match.p1.id === playerId ? match.p2 : match.p1;
                 send(other, { type: 'rematch_declined' });
-                // Put both back in queue
                 queue.push(match.p1.id);
                 queue.push(match.p2.id);
                 cleanupMatch(match.id);

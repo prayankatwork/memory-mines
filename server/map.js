@@ -1,12 +1,12 @@
-// server/map.js — Procedural map generator (shared seed between server & client)
-// Updated for 1v1 MVP: 64x64 map, 16x16 grid
+// server/map.js — Procedural map generator with mines
+// 64x64 world, 16x16 grid, 4 units per tile
 
 const MAP_SIZE = 64;
 const TILE_SIZE = 4;
 const GRID_SIZE = MAP_SIZE / TILE_SIZE; // 16
 
-const TILE = { FLOOR: 0, WALL: 1, PILLAR: 2 };
-
+const TILE = { FLOOR: 0, WALL: 1, PILLAR: 2, MINE: 3 };
+const MINE_TYPE = { TRIGGER: 'trigger', PROXIMITY: 'proximity', DECOY: 'decoy' };
 const LANDMARK = { TOWER: 'tower', BRIDGE: 'bridge', TUNNEL: 'tunnel', ARENA: 'arena', RUINS: 'ruins' };
 
 // Seeded PRNG (mulberry32)
@@ -22,6 +22,7 @@ function seededRandom(seed) {
 function generateMap(seed) {
     const rng = seededRandom(seed);
     const grid = Array.from({ length: GRID_SIZE }, () => Array(GRID_SIZE).fill(TILE.FLOOR));
+    const mineData = [];
 
     // Outer walls
     for (let x = 0; x < GRID_SIZE; x++) {
@@ -33,8 +34,8 @@ function generateMap(seed) {
         grid[y][GRID_SIZE - 1] = TILE.WALL;
     }
 
-    // Internal walls (12-18% density)
-    const density = 0.12 + rng() * 0.06;
+    // Internal walls (10-14% density — sparser to leave room for mines)
+    const density = 0.10 + rng() * 0.04;
     for (let y = 2; y < GRID_SIZE - 2; y++)
         for (let x = 2; x < GRID_SIZE - 2; x++)
             if (rng() < density) grid[y][x] = TILE.WALL;
@@ -42,18 +43,21 @@ function generateMap(seed) {
     // Ensure connectivity
     floodFillConnect(grid, rng);
 
-    // Scatter pillars
+    // Scatter pillars (fewer now)
     for (let y = 2; y < GRID_SIZE - 2; y++)
         for (let x = 2; x < GRID_SIZE - 2; x++)
-            if (grid[y][x] === TILE.FLOOR && rng() < 0.03) grid[y][x] = TILE.PILLAR;
+            if (grid[y][x] === TILE.FLOOR && rng() < 0.02) grid[y][x] = TILE.PILLAR;
 
     // Place landmarks
     const landmarks = placeLandmarks(grid, rng);
 
-    // Spawns — opposite sides of the map
+    // Place mines — 30 mines across walkable tiles
+    const mines = placeMines(grid, rng, 30);
+
+    // Spawns — opposite sides of map
     const spawns = findSpawns(grid, rng);
 
-    return { seed, grid, landmarks, spawns, mapSize: MAP_SIZE, tileSize: TILE_SIZE, gridSize: GRID_SIZE };
+    return { seed, grid, landmarks, spawns, mines, mapSize: MAP_SIZE, tileSize: TILE_SIZE, gridSize: GRID_SIZE };
 }
 
 function floodFillConnect(grid, rng) {
@@ -104,25 +108,23 @@ function placeLandmarks(grid, rng) {
     const landmarks = [];
     const cx = Math.floor(GRID_SIZE / 2), cy = Math.floor(GRID_SIZE / 2);
 
-    // Arena (center)
+    // Arena (center) — open fighting pit
     clearCircle(grid, cx, cy, 2);
-    // Build arena walls (ring)
     for (let dy = -3; dy <= 3; dy++)
         for (let dx = -3; dx <= 3; dx++) {
             const dist = Math.sqrt(dx * dx + dy * dy);
             if (dist > 1.5 && dist < 3.5) {
                 const gx = cx + dx, gy = cy + dy;
                 if (gx > 0 && gx < GRID_SIZE - 1 && gy > 0 && gy < GRID_SIZE - 1)
-                    if (rng() < 0.7) grid[gy][gx] = TILE.WALL;
+                    if (rng() < 0.6) grid[gy][gx] = TILE.WALL;
             }
         }
     landmarks.push({ type: LANDMARK.ARENA, gx: cx, gy: cy, size: 7 });
 
-    // Tower (north-east quadrant)
+    // Tower (north-east)
     const tx = Math.floor(GRID_SIZE * 0.75) + Math.floor(rng() * 2);
     const ty = Math.floor(GRID_SIZE * 0.25) + Math.floor(rng() * 2);
     clearCircle(grid, tx, ty, 2);
-    // Tower walls (small square)
     for (let dy = -2; dy <= 2; dy++)
         for (let dx = -2; dx <= 2; dx++)
             if (Math.abs(dx) === 2 || Math.abs(dy) === 2) {
@@ -132,14 +134,13 @@ function placeLandmarks(grid, rng) {
             }
     landmarks.push({ type: LANDMARK.TOWER, gx: tx, gy: ty, size: 5 });
 
-    // Bridge (horizontal corridor)
+    // Bridge (horizontal corridor across middle)
     const by = Math.floor(GRID_SIZE * 0.5) + Math.floor(rng() * 3 - 1);
     for (let x = 3; x < GRID_SIZE - 3; x++) {
         if (grid[by][x] === TILE.WALL) grid[by][x] = TILE.FLOOR;
         if (by > 0) grid[by - 1][x] = TILE.WALL;
         if (by < GRID_SIZE - 1) grid[by + 1][x] = TILE.WALL;
     }
-    // Bridge entrances
     if (by > 1) { grid[by - 1][3] = TILE.FLOOR; grid[by - 1][GRID_SIZE - 4] = TILE.FLOOR; }
     if (by < GRID_SIZE - 2) { grid[by + 1][3] = TILE.FLOOR; grid[by + 1][GRID_SIZE - 4] = TILE.FLOOR; }
     landmarks.push({ type: LANDMARK.BRIDGE, gx: Math.floor(GRID_SIZE / 2), gy: by, size: GRID_SIZE - 6 });
@@ -151,11 +152,10 @@ function placeLandmarks(grid, rng) {
         for (let dx = -3; dx <= 3; dx++) {
             const gx = tnx + dx, gy = tny + dy;
             if (gx > 0 && gx < GRID_SIZE - 1 && gy > 0 && gy < GRID_SIZE - 1) {
-                if (Math.abs(dy) <= 1) grid[gy][gx] = TILE.FLOOR;  // Tunnel passage
-                else if (Math.abs(dx) <= 2) grid[gy][gx] = TILE.WALL; // Tunnel walls
+                if (Math.abs(dy) <= 1) grid[gy][gx] = TILE.FLOOR;
+                else if (Math.abs(dx) <= 2) grid[gy][gx] = TILE.WALL;
             }
         }
-    // Carve tunnel entrances
     grid[tny][tnx - 3] = TILE.FLOOR; grid[tny][tnx + 3] = TILE.FLOOR;
     landmarks.push({ type: LANDMARK.TUNNEL, gx: tnx, gy: tny, size: 7 });
 
@@ -164,7 +164,7 @@ function placeLandmarks(grid, rng) {
     clearCircle(grid, rx, ry, 2);
     for (let dy = -3; dy <= 3; dy++)
         for (let dx = -3; dx <= 3; dx++)
-            if (Math.abs(dx) + Math.abs(dy) <= 4 && rng() < 0.35) {
+            if (Math.abs(dx) + Math.abs(dy) <= 4 && rng() < 0.3) {
                 const gx = rx + dx, gy = ry + dy;
                 if (gx > 0 && gx < GRID_SIZE - 1 && gy > 0 && gy < GRID_SIZE - 1 && grid[gy][gx] === TILE.FLOOR)
                     grid[gy][gx] = TILE.PILLAR;
@@ -174,6 +174,53 @@ function placeLandmarks(grid, rng) {
     return landmarks;
 }
 
+function placeMines(grid, rng, count) {
+    const mines = [];
+    const cx = Math.floor(GRID_SIZE / 2), cy = Math.floor(GRID_SIZE / 2);
+    const candidates = [];
+
+    // Collect walkable tiles, excluding center arena and spawn areas
+    for (let y = 2; y < GRID_SIZE - 2; y++) {
+        for (let x = 2; x < GRID_SIZE - 2; x++) {
+            if (grid[y][x] !== TILE.FLOOR) continue;
+            const distFromCenter = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
+            if (distFromCenter < 3) continue; // Keep center arena clear
+            candidates.push({ gx: x, gy: y });
+        }
+    }
+
+    // Shuffle candidates
+    for (let i = candidates.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+    }
+
+    // Place mines
+    const placed = Math.min(count, candidates.length);
+    for (let i = 0; i < placed; i++) {
+        const c = candidates[i];
+        const typeRoll = rng();
+        let type;
+        if (typeRoll < 0.5) type = MINE_TYPE.TRIGGER;       // 50% trigger
+        else if (typeRoll < 0.85) type = MINE_TYPE.PROXIMITY; // 35% proximity
+        else type = MINE_TYPE.DECOY;                          // 15% decoy
+
+        const worldPos = gridToWorld(c.gx, c.gy);
+        mines.push({
+            id: `m_${i}`,
+            gx: c.gx,
+            gy: c.gy,
+            x: worldPos.x,
+            z: worldPos.z,
+            type: type,
+            active: true,
+            triggered: false
+        });
+    }
+
+    return mines;
+}
+
 function findSpawns(grid, rng) {
     const cx = Math.floor(GRID_SIZE / 2), cy = Math.floor(GRID_SIZE / 2);
     const cells = [];
@@ -181,17 +228,15 @@ function findSpawns(grid, rng) {
         for (let x = 2; x < GRID_SIZE - 2; x++)
             if (grid[y][x] === TILE.FLOOR) {
                 const dist = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
-                if (dist > 3) cells.push({ x, y, dist });
+                if (dist > 4) cells.push({ x, y, dist });
             }
 
     cells.sort((a, b) => b.dist - a.dist);
 
-    // Take two spawns as far from each other as possible
     const spawns = [];
     if (cells.length >= 2) {
         const first = cells[0];
         spawns.push(gridToWorld(first.x, first.y));
-        // Find cell farthest from first
         let best = null, bestDist = -1;
         for (const c of cells) {
             const d = Math.abs(c.x - first.x) + Math.abs(c.y - first.y);
@@ -224,7 +269,7 @@ function worldToGrid(wx, wz) {
 function isWalkable(grid, wx, wz) {
     const g = worldToGrid(wx, wz);
     if (g.x < 0 || g.x >= GRID_SIZE || g.y < 0 || g.y >= GRID_SIZE) return false;
-    return grid[g.y][g.x] === TILE.FLOOR;
+    return grid[g.y][g.x] === TILE.FLOOR || grid[g.y][g.x] === TILE.MINE;
 }
 
-module.exports = { generateMap, gridToWorld, worldToGrid, isWalkable, TILE, LANDMARK, MAP_SIZE, TILE_SIZE, GRID_SIZE };
+module.exports = { generateMap, gridToWorld, worldToGrid, isWalkable, TILE, MINE_TYPE, LANDMARK, MAP_SIZE, TILE_SIZE, GRID_SIZE };

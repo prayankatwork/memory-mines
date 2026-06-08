@@ -172,6 +172,26 @@ class NetworkManager {
                 this.emit('opponent_disconnected', msg);
                 break;
 
+            case 'mine_explosion':
+                this.emit('mine_explosion', msg);
+                break;
+
+            case 'proximity_beep':
+                this.emit('proximity_beep', msg);
+                break;
+
+            case 'muzzle_flash':
+                this.emit('muzzle_flash', msg);
+                break;
+
+            case 'player_detected':
+                this.emit('player_detected', msg);
+                break;
+
+            case 'decoy_found':
+                this.emit('decoy_found', msg);
+                break;
+
             default:
                 break;
         }

@@ -1,5 +1,4 @@
-// server/classes.js — Scout-only class definition for MVP
-// Hunter and future classes are in FUTURE_ROADMAP.md
+// server/classes.js — Class definitions for Memory Mines
 
 const CLASSES = {
     SCOUT: 'scout'
@@ -8,22 +7,23 @@ const CLASSES = {
 const CLASS_DEFS = {
     [CLASSES.SCOUT]: {
         name: 'Scout',
-        description: 'Sonar specialist. Reveals areas and detects enemies.',
+        description: 'Mine specialist. Uses sonar to detect hidden mines and navigate the dark.',
         health: 100,
-        moveSpeed: 6.0,
-        abilityName: 'Sonar Pulse',
-        abilityDescription: 'Sends a pulse that reveals terrain and enemies in a large radius for 2 seconds.',
-        abilityCooldown: 12000,    // 12 seconds
-        abilityDuration: 2000,     // 2 seconds
-        abilityRadius: 20,          // world units
-        passiveName: 'Keen Sense',
-        passiveDescription: 'Re-reveal radius when standing still is 50% larger.',
-        revealRadiusMultiplier: 1.5,
-        revealTime: 3000,           // 3 seconds to re-reveal
-        revealRadius: 8,            // base radius of re-reveal
+        moveSpeed: 6.5,
+        abilityName: 'Sonar Scan',
+        abilityDescription: 'Sends a pulse that reveals all mines within 15 units for 1.5 seconds.',
+        abilityCooldown: 10000,     // 10 seconds
+        abilityDuration: 1500,      // 1.5 seconds
+        abilityRadius: 15,          // world units — reveals mines in this radius
         weaponDamage: 25,
         weaponRange: 50,
-        weaponFireRate: 500         // ms between shots (2 shots/second)
+        weaponFireRate: 500,        // ms between shots (2 shots/second)
+        muzzleFlashDuration: 400,   // ms your position is revealed after shooting
+        mineTriggerDamage: 30,      // trigger mine damage
+        mineProximityDamage: 50,    // proximity mine damage
+        proximityBeepCount: 3,      // beeps before proximity mine explodes
+        proximityBeepInterval: 350, // ms between beeps
+        zoneDamage: 8               // dps outside zone
     }
 };
 
