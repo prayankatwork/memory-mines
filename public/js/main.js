@@ -42,10 +42,11 @@
         matchFoundSection.classList.remove('hidden');
         opponentName.textContent = msg.opponent;
         queueBtn.textContent = 'FIND MATCH';
-        // Reset accept button state for new match
+        // Reset UI state for new match
         acceptBtn.disabled = false;
         acceptBtn.textContent = 'ACCEPT';
         acceptBtn.style.opacity = '1';
+        document.getElementById('opponent-accepted').classList.add('hidden');
     });
 
     network.on('match_confirmed', () => {
