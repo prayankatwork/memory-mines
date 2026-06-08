@@ -42,6 +42,17 @@
         matchFoundSection.classList.remove('hidden');
         opponentName.textContent = msg.opponent;
         queueBtn.textContent = 'FIND MATCH';
+        // Reset accept button state for new match
+        acceptBtn.disabled = false;
+        acceptBtn.textContent = 'ACCEPT';
+        acceptBtn.style.opacity = '1';
+    });
+
+    network.on('match_confirmed', () => {
+        // Show visual feedback — player's accept was received
+        acceptBtn.disabled = true;
+        acceptBtn.textContent = 'WAITING...';
+        acceptBtn.style.opacity = '0.5';
     });
 
     network.on('match_start', (msg) => {

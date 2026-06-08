@@ -96,6 +96,10 @@ function confirmMatch(playerId) {
     for (const [, match] of matches) {
         if ((match.p1.id === playerId || match.p2.id === playerId) && match.phase === MATCH_PHASE.WAITING) {
             match.confirmed.add(playerId);
+            // Send confirmation back to the clicking player (so they see immediate feedback)
+            const player = players.get(playerId);
+            if (player) send(player, { type: 'match_confirmed' });
+            // Notify the other player that opponent confirmed
             const other = match.p1.id === playerId ? match.p2 : match.p1;
             send(other, { type: 'opponent_confirmed' });
             if (match.confirmed.size >= 2) {

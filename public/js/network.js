@@ -100,6 +100,10 @@ class NetworkManager {
                 this.emit('match_found', msg);
                 break;
 
+            case 'match_confirmed':
+                this.emit('match_confirmed');
+                break;
+
             case 'opponent_confirmed':
                 this.emit('opponent_confirmed');
                 break;
