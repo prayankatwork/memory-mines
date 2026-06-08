@@ -11,12 +11,23 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// Serve static files from /public
-app.use(express.static(path.join(__dirname, '..', 'public')));
+const publicDir = path.join(__dirname, '..', 'public');
+console.log(`[Server] Public directory: ${publicDir}`);
 
-// Fallback to index.html (Express 5 compatible)
+// Health check for Render
+app.get('/healthz', (req, res) => res.send('ok'));
+
+// Serve static files from /public
+app.use(express.static(publicDir));
+
+// Root route — explicitly serve index.html
+app.get('/', (req, res) => {
+    res.sendFile(path.join(publicDir, 'index.html'));
+});
+
+// Fallback — catch all other routes (SPA support)
 app.use((req, res) => {
-    res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+    res.sendFile(path.join(publicDir, 'index.html'));
 });
 
 // ── WebSocket ──
