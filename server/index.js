@@ -4,12 +4,7 @@ const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
-const mime = require('mime');
 const game = require('./game');
-
-// Register correct MIME types (Express 5/mime v3 compat)
-mime.define({ 'application/javascript': ['js'] }, true);
-mime.define({ 'text/css': ['css'] }, true);
 
 const PORT = process.env.PORT || 3000;
 const app = express();
